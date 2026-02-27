@@ -1,4 +1,4 @@
-package com.gameplatform.api_gateway;
+package com.gameplatform.apigateway;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
