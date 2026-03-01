@@ -46,7 +46,7 @@ Routes are defined in `application.yml`:
 
 ## 🛠 Tech Stack
 
-* **Framework:** Spring Boot 3.4+
+* **Framework:** Spring Boot 3.5
 * **Gateway:** Spring Cloud Gateway (WebFlux)
 * **Security:** Spring Security OAuth2 Resource Server
 * **Token Library:** Nimbus JOSE + JWT
