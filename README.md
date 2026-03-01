@@ -38,7 +38,7 @@ Routes are defined in `application.yml`:
 | Path Pattern | Target Service | Auth Required |
 | :--- | :--- | :--- |
 | `/api/v1/public/**` | Main Service | No |
-| `/api/v1/admin/**` | Main Service | Yes (`ROLE_admin`) |
+| `/api/v1/admin/**` | Main Service | Yes (`ROLE_admin`, `ROLE_superadmin`) |
 | `/api/v1/**` | Main Service | Yes |
 | `/actuator/health` | Gateway (Self) | No |
 
