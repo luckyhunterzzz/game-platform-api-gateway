@@ -13,6 +13,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * Global filter for security and user data.
@@ -78,7 +79,9 @@ public class UserContextFilter implements GlobalFilter, Ordered {
                 .map(rolesObj -> {
                     @SuppressWarnings("unchecked")
                     List<String> rolesList = (List<String>) rolesObj;
-                    return String.join(",", rolesList);
+                    return rolesList.stream()
+                            .map(role -> "ROLE_" + role.trim())
+                            .collect(Collectors.joining(","));
                 })
                 .orElse("");
     }
