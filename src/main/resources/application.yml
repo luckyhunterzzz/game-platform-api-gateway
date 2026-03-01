@@ -10,20 +10,17 @@ spring:
       server:
         webflux:
           routes:
-            - id: main-page-service
-              uri: http://main-page-service:8082
+            - id: main-service
+              uri: http://main-service:8082
               predicates:
                 - Path=/api/v1/**
               filters:
-                - RemoveRequestHeader=X-User-Id
-                - RemoveRequestHeader=X-User-Roles
-                - RemoveRequestHeader=X-Request-Id
 
   security:
     oauth2:
       resourceserver:
         jwt:
-          issuer-uri: http://localhost:8080/realms/game-realm
+          issuer-uri: http://keycloak:8080/realms/game-realm
 
 management:
   endpoints:
