@@ -1,6 +1,10 @@
 server:
   port: 8081
 
+app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
 spring:
   application:
     name: game-platform-api-gateway
@@ -14,7 +18,27 @@ spring:
               uri: http://main-service:8082
               predicates:
                 - Path=/api/v1/**
-              filters:
+          globalcors:
+            add-to-simple-url-handler-mapping: true
+            cors-configurations:
+              '[/**]':
+                          allowedOrigins:
+                            - ${app.cors.allowed-origins}
+                          allowedMethods:
+                            - GET
+                            - POST
+                            - PUT
+                            - PATCH
+                            - DELETE
+                            - OPTIONS
+                          allowedHeaders:
+                            - Authorization
+                            - Content-Type
+                            - X-Request-Id
+                          exposedHeaders:
+                            - X-Request-Id
+                          allowCredentials: false
+                          maxAge: 3600
 
   security:
     oauth2:
