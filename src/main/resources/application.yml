@@ -14,31 +14,47 @@ spring:
       server:
         webflux:
           routes:
-            - id: main-service
+            - id: main-service-public
               uri: http://main-service:8082
               predicates:
-                - Path=/api/v1/**
+                - Path=/api/v1/public/**
+
+            - id: main-service-admin
+              uri: http://main-service:8082
+              predicates:
+                - Path=/api/v1/admin/**
+
+            - id: player-profile-service
+              uri: http://player-profile-service:8083
+              predicates:
+                - Path=/api/v1/profile/**
+
+            - id: joint-purchase-service
+              uri: http://joint-purchase-service:8085
+              predicates:
+                - Path=/api/v1/joint-purchases/**,/api/v1/applications/**
+
           globalcors:
             add-to-simple-url-handler-mapping: true
             cors-configurations:
               '[/**]':
-                          allowedOrigins:
-                            - ${app.cors.allowed-origins}
-                          allowedMethods:
-                            - GET
-                            - POST
-                            - PUT
-                            - PATCH
-                            - DELETE
-                            - OPTIONS
-                          allowedHeaders:
-                            - Authorization
-                            - Content-Type
-                            - X-Request-Id
-                          exposedHeaders:
-                            - X-Request-Id
-                          allowCredentials: false
-                          maxAge: 3600
+                allowedOrigins:
+                  - ${app.cors.allowed-origins}
+                allowedMethods:
+                  - GET
+                  - POST
+                  - PUT
+                  - PATCH
+                  - DELETE
+                  - OPTIONS
+                allowedHeaders:
+                  - Authorization
+                  - Content-Type
+                  - X-Request-Id
+                exposedHeaders:
+                  - X-Request-Id
+                allowCredentials: false
+                maxAge: 3600
 
   security:
     oauth2:

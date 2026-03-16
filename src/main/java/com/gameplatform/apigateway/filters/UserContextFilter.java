@@ -23,7 +23,12 @@ import java.util.stream.Collectors;
 @Component
 public class UserContextFilter implements GlobalFilter, Ordered {
 
-    private static final List<String> SENSITIVE_HEADERS = List.of("X-User-Id", "X-User-Roles", "X-User-Username");
+    private static final List<String> SENSITIVE_HEADERS = List.of(
+            "X-User-Id",
+            "X-User-Roles",
+            "X-User-Username",
+            "X-User-Email"
+    );
 
     /**
      * Cleans the request and add verified user information
@@ -55,16 +60,18 @@ public class UserContextFilter implements GlobalFilter, Ordered {
 
         String userId = jwt.getSubject();
         String username = jwt.getClaimAsString("preferred_username");
-
+        String email = jwt.getClaimAsString("email");
         String roles = extractRoles(jwt);
 
         Optional.ofNullable(userId).ifPresent(user -> requestBuilder.header("X-User-Id", user));
         Optional.ofNullable(username).ifPresent(user -> requestBuilder.header("X-User-Username", user));
-        if(!roles.isEmpty()) {
+        Optional.ofNullable(email).ifPresent(user -> requestBuilder.header("X-User-Email", user));
+
+        if (!roles.isEmpty()) {
             requestBuilder.header("X-User-Roles", roles);
         }
 
-        log.debug("Enriched request for user: {} (ID: {}), roles: {}", username, userId, roles);
+        log.debug("Enriched request for user: {} (ID: {}), email: {}, roles: {}", username, userId, email, roles);
 
         return scrubbedExchange.mutate().request(requestBuilder.build()).build();
     }
