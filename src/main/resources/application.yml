@@ -32,7 +32,7 @@ spring:
             - id: joint-purchase-service
               uri: http://joint-purchase-service:8085
               predicates:
-                - Path=/api/v1/joint-purchases/**,/api/v1/applications/**
+                - Path=/api/v1/joint-purchases/**,/api/v1/applications/**,/api/v1/organizer/**
 
           globalcors:
             add-to-simple-url-handler-mapping: true
