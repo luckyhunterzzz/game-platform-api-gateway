@@ -58,6 +58,7 @@ public class SecurityConfig {
                         .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .pathMatchers("/api/v1/public/**").permitAll()
                         .pathMatchers("/actuator/health").permitAll()
+                        .pathMatchers("/actuator/prometheus").permitAll()
                         .pathMatchers("/api/v1/admin/**").hasAnyRole("admin", "superadmin")
                         .pathMatchers("/api/v1/**").authenticated()
                         .anyExchange().denyAll()
