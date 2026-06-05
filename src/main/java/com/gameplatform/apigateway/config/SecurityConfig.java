@@ -1,6 +1,5 @@
 package com.gameplatform.apigateway.config;
 
-import com.nimbusds.jwt.JWTParser;
 import com.gameplatform.apigateway.security.KeycloakRoleConverter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,27 +7,22 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
-import org.springframework.security.authentication.ReactiveAuthenticationManager;
-import org.springframework.security.authentication.ReactiveAuthenticationManagerResolver;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
+import org.springframework.security.oauth2.core.OAuth2Error;
+import org.springframework.security.oauth2.core.OAuth2TokenValidator;
+import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.jwt.*;
-import org.springframework.security.oauth2.server.resource.authentication.JwtReactiveAuthenticationManager;
-import org.springframework.security.oauth2.server.resource.web.server.authentication.ServerBearerTokenAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtGrantedAuthoritiesConverterAdapter;
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.reactive.CorsConfigurationSource;
 import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
 
-import java.text.ParseException;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -60,10 +54,9 @@ public class SecurityConfig {
      * @return the configurated ServerHttpSecurityChain.
      */
     @Bean
-    public SecurityWebFilterChain securityWebFilterChain(
-            ServerHttpSecurity http,
-            ReactiveAuthenticationManagerResolver<ServerWebExchange> authenticationManagerResolver
-    ) {
+    public SecurityWebFilterChain securityWebFilterChain(ServerHttpSecurity http, ReactiveJwtDecoder jwtDecoder) {
+        ReactiveJwtAuthenticationConverter jwtAuthenticationConverter = jwtAuthenticationConverter();
+
         return http
                 .csrf(ServerHttpSecurity.CsrfSpec::disable)
                 .cors(withDefaults())
@@ -76,7 +69,12 @@ public class SecurityConfig {
                         .pathMatchers("/api/v1/**").authenticated()
                         .anyExchange().denyAll()
                 )
-                .oauth2ResourceServer(oauth -> oauth.authenticationManagerResolver(authenticationManagerResolver))
+                .oauth2ResourceServer(oauth -> oauth
+                        .jwt(jwt -> jwt
+                                .jwtAuthenticationConverter(jwtAuthenticationConverter)
+                                .jwtDecoder(jwtDecoder)
+                        )
+                )
                 .build();
     }
 
@@ -100,9 +98,15 @@ public class SecurityConfig {
      */
     @Bean
     @Profile("dev")
-    public ReactiveAuthenticationManagerResolver<ServerWebExchange> devAuthenticationManagerResolver() {
-        ReactiveAuthenticationManager authenticationManager = buildDevAuthenticationManager(issuerUri);
-        return exchange -> Mono.just(authenticationManager);
+    public ReactiveJwtDecoder devJwtDecoder() {
+        NimbusReactiveJwtDecoder jwtDecoder = NimbusReactiveJwtDecoder.withIssuerLocation(issuerUri).build();
+
+        DelegatingOAuth2TokenValidator<Jwt> validator = new DelegatingOAuth2TokenValidator<>(
+                new JwtTimestampValidator()
+        );
+
+        jwtDecoder.setJwtValidator(validator);
+        return jwtDecoder;
     }
 
     /**
@@ -111,43 +115,19 @@ public class SecurityConfig {
      */
     @Bean
     @Profile("!dev")
-    public ReactiveAuthenticationManagerResolver<ServerWebExchange> prodAuthenticationManagerResolver() {
-        Map<String, ReactiveAuthenticationManager> authenticationManagers = getTrustedIssuers().stream()
-                .collect(Collectors.toMap(
-                        issuer -> issuer,
-                        this::buildProdAuthenticationManager,
-                        (left, right) -> left,
-                        java.util.LinkedHashMap::new
-                ));
-        ServerBearerTokenAuthenticationConverter bearerTokenConverter =
-                new ServerBearerTokenAuthenticationConverter();
-
-        return exchange -> bearerTokenConverter.convert(exchange)
-                .cast(org.springframework.security.oauth2.server.resource.BearerTokenAuthenticationToken.class)
-                .map(org.springframework.security.oauth2.server.resource.BearerTokenAuthenticationToken::getToken)
-                .flatMap(token -> Mono.justOrEmpty(extractIssuer(token)))
-                .flatMap(issuer -> Mono.justOrEmpty(authenticationManagers.get(issuer)));
-    }
-
-    private ReactiveAuthenticationManager buildDevAuthenticationManager(String issuer) {
-        NimbusReactiveJwtDecoder jwtDecoder = NimbusReactiveJwtDecoder.withIssuerLocation(issuer).build();
+    public ReactiveJwtDecoder prodJwtDecoder() {
+        Set<String> trustedIssuers = getTrustedIssuers();
+        NimbusReactiveJwtDecoder jwtDecoder = NimbusReactiveJwtDecoder
+                .withJwkSetUri(buildJwkSetUri(issuerUri))
+                .build();
 
         DelegatingOAuth2TokenValidator<Jwt> validator = new DelegatingOAuth2TokenValidator<>(
-                new JwtTimestampValidator()
+                new JwtTimestampValidator(),
+                trustedIssuerValidator(trustedIssuers)
         );
 
         jwtDecoder.setJwtValidator(validator);
-
-        JwtReactiveAuthenticationManager authenticationManager = new JwtReactiveAuthenticationManager(jwtDecoder);
-        authenticationManager.setJwtAuthenticationConverter(jwtAuthenticationConverter());
-        return authenticationManager;
-    }
-
-    private ReactiveAuthenticationManager buildProdAuthenticationManager(String issuer) {
-        ReactiveJwtDecoder jwtDecoder = ReactiveJwtDecoders.fromIssuerLocation(issuer);
-        JwtReactiveAuthenticationManager authenticationManager = new JwtReactiveAuthenticationManager(jwtDecoder);
-        authenticationManager.setJwtAuthenticationConverter(jwtAuthenticationConverter());
-        return authenticationManager;
+        return jwtDecoder;
     }
 
     private ReactiveJwtAuthenticationConverter jwtAuthenticationConverter() {
@@ -168,12 +148,19 @@ public class SecurityConfig {
                 .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private String extractIssuer(String token) {
-        try {
-            return JWTParser.parse(token).getJWTClaimsSet().getIssuer();
-        } catch (ParseException exception) {
-            return null;
-        }
+    private OAuth2TokenValidator<Jwt> trustedIssuerValidator(Set<String> trustedIssuers) {
+        return jwt -> trustedIssuers.contains(jwt.getIssuer() != null ? jwt.getIssuer().toString() : null)
+                ? OAuth2TokenValidatorResult.success()
+                : OAuth2TokenValidatorResult.failure(new OAuth2Error(
+                        "invalid_token",
+                        "The token issuer is not trusted",
+                        null
+                ));
+    }
+
+    private String buildJwkSetUri(String issuer) {
+        String normalizedIssuer = issuer.endsWith("/") ? issuer.substring(0, issuer.length() - 1) : issuer;
+        return normalizedIssuer + "/protocol/openid-connect/certs";
     }
 
 }
