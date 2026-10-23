@@ -1,6 +1,7 @@
 package com.gameplatform.apigateway.config;
 
 import com.gameplatform.apigateway.security.KeycloakAuthoritiesExtractor;
+import com.gameplatform.apigateway.security.FrontendRedirectResolver;
 import com.gameplatform.apigateway.security.KeycloakLogoutSuccessHandler;
 import com.gameplatform.apigateway.security.KeycloakOidcUserService;
 import com.gameplatform.apigateway.security.KeycloakRoleConverter;
@@ -65,6 +66,7 @@ public class SecurityConfig {
     private final KeycloakAuthoritiesExtractor authoritiesExtractor;
     private final RedisRefreshLockService refreshLockService;
     private final KeycloakLogoutSuccessHandler logoutSuccessHandler;
+    private final FrontendRedirectResolver frontendRedirectResolver;
 
     @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}")
     private String issuerUri;
@@ -72,8 +74,6 @@ public class SecurityConfig {
     private String additionalIssuers;
     @Value("${app.cors.allowed-origins}")
     private List<String> allowedOrigins;
-    @Value("${app.security.frontend-base-url}")
-    private String frontendBaseUrl;
     @Value("${app.security.refresh.clock-skew}")
     private Duration refreshClockSkew;
     @Value("${app.security.refresh.lock-ttl}")
@@ -89,12 +89,14 @@ public class SecurityConfig {
             KeycloakRoleConverter keycloakRoleConverter,
             KeycloakAuthoritiesExtractor authoritiesExtractor,
             RedisRefreshLockService refreshLockService,
-            KeycloakLogoutSuccessHandler logoutSuccessHandler
+            KeycloakLogoutSuccessHandler logoutSuccessHandler,
+            FrontendRedirectResolver frontendRedirectResolver
     ) {
         this.keycloakRoleConverter = keycloakRoleConverter;
         this.authoritiesExtractor = authoritiesExtractor;
         this.refreshLockService = refreshLockService;
         this.logoutSuccessHandler = logoutSuccessHandler;
+        this.frontendRedirectResolver = frontendRedirectResolver;
     }
 
     @Bean
@@ -165,10 +167,20 @@ public class SecurityConfig {
                 .oauth2Login(oauth2 -> oauth2
                         .authorizedClientRepository(authorizedClientRepository)
                         .authenticationManager(oidcAuthenticationManager)
-                        .authenticationFailureHandler(new RedirectServerAuthenticationFailureHandler(
-                                frontendBaseUrl + "/?authError=oauth2_login_failed"
-                        ))
-                        .authenticationSuccessHandler(new RedirectServerAuthenticationSuccessHandler(frontendBaseUrl))
+                        .authenticationFailureHandler((webFilterExchange, exception) ->
+                                new RedirectServerAuthenticationFailureHandler(
+                                        frontendRedirectResolver
+                                                .resolveAuthenticationFailure(webFilterExchange.getExchange())
+                                                .toString()
+                                ).onAuthenticationFailure(webFilterExchange, exception)
+                        )
+                        .authenticationSuccessHandler((webFilterExchange, authentication) ->
+                                new RedirectServerAuthenticationSuccessHandler(
+                                        frontendRedirectResolver
+                                                .resolveFrontend(webFilterExchange.getExchange())
+                                                .toString()
+                                ).onAuthenticationSuccess(webFilterExchange, authentication)
+                        )
                 )
                 .oauth2Client(oauth2 -> oauth2
                         .authorizedClientRepository(authorizedClientRepository)

@@ -16,31 +16,32 @@ import java.net.URI;
 public class KeycloakLogoutSuccessHandler implements ServerLogoutSuccessHandler {
 
     private final String keycloakLogoutUri;
-    private final String frontendBaseUrl;
     private final String clientId;
+    private final FrontendRedirectResolver frontendRedirectResolver;
 
     public KeycloakLogoutSuccessHandler(
             @Value("${app.security.keycloak-logout-uri}") String keycloakLogoutUri,
-            @Value("${app.security.frontend-base-url}") String frontendBaseUrl,
-            @Value("${spring.security.oauth2.client.registration.keycloak.client-id}") String clientId
+            @Value("${spring.security.oauth2.client.registration.keycloak.client-id}") String clientId,
+            FrontendRedirectResolver frontendRedirectResolver
     ) {
         this.keycloakLogoutUri = keycloakLogoutUri;
-        this.frontendBaseUrl = frontendBaseUrl;
         this.clientId = clientId;
+        this.frontendRedirectResolver = frontendRedirectResolver;
     }
 
     @Override
     public Mono<Void> onLogoutSuccess(WebFilterExchange webFilterExchange, Authentication authentication) {
-        URI redirectUri = buildRedirectUri(authentication);
+        URI redirectUri = buildRedirectUri(webFilterExchange, authentication);
         webFilterExchange.getExchange().getResponse().setStatusCode(HttpStatus.SEE_OTHER);
         webFilterExchange.getExchange().getResponse().getHeaders().setLocation(redirectUri);
         return webFilterExchange.getExchange().getResponse().setComplete();
     }
 
-    private URI buildRedirectUri(Authentication authentication) {
+    private URI buildRedirectUri(WebFilterExchange webFilterExchange, Authentication authentication) {
+        URI frontendUri = frontendRedirectResolver.resolveFrontend(webFilterExchange.getExchange());
         UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(keycloakLogoutUri)
                 .queryParam("client_id", clientId)
-                .queryParam("post_logout_redirect_uri", frontendBaseUrl);
+                .queryParam("post_logout_redirect_uri", frontendUri);
 
         if (authentication != null && authentication.getPrincipal() instanceof OidcUser oidcUser) {
             builder.queryParam("id_token_hint", oidcUser.getIdToken().getTokenValue());

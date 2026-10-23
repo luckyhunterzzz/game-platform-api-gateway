@@ -62,6 +62,8 @@ Important optional settings:
 
 ```text
 APP_SECURITY_FRONTEND_BASE_URL=http://localhost:3000
+APP_SECURITY_RU_FRONTEND_BASE_URL=https://ru.gameops-platform.dev
+APP_SECURITY_RU_API_BASE_URL=https://ru-api.gameops-platform.dev
 APP_SECURITY_KEYCLOAK_LOGOUT_URI=http://localhost:8080/realms/game-realm/protocol/openid-connect/logout
 APP_SECURITY_REFRESH_CLOCK_SKEW=60s
 APP_SECURITY_REFRESH_LOCK_TTL=30s
@@ -71,6 +73,11 @@ SERVER_REACTIVE_SESSION_COOKIE_NAME=GAME_SESSION
 SERVER_REACTIVE_SESSION_COOKIE_MAX_AGE=7d
 SERVER_REACTIVE_SESSION_COOKIE_SECURE=false
 ```
+
+OAuth2 success, failure and logout redirects are selected from a fixed allowlist. Requests received through
+the configured RU API host return to the RU frontend; every other host returns to the default frontend.
+Production reverse proxies must overwrite forwarded host and protocol headers, and the Gateway must use
+`SERVER_FORWARD_HEADERS_STRATEGY=framework`.
 
 The cookie `Max-Age` and Redis session timeout should stay aligned. With the default `7d` values, closing and reopening the browser does not end an otherwise valid session.
 
