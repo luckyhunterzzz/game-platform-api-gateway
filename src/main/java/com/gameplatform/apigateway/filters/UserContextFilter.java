@@ -5,6 +5,9 @@ import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.stereotype.Component;
@@ -15,10 +18,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-/**
- * Global filter for security and user data.
- * It removes fake user headers and adds real user info from the JWT token.
- */
 @Slf4j
 @Component
 public class UserContextFilter implements GlobalFilter, Ordered {
@@ -30,74 +29,72 @@ public class UserContextFilter implements GlobalFilter, Ordered {
             "X-User-Email"
     );
 
-    /**
-     * Cleans the request and add verified user information
-     * @param exchange the current server exchange
-     * @param chain the filter chain
-     * @return a Mono to continue the filter chain
-     */
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         ServerHttpRequest cleanedRequest = exchange.getRequest().mutate()
                 .headers(headers -> SENSITIVE_HEADERS.forEach(headers::remove))
                 .build();
         ServerWebExchange scrubbedExchange = exchange.mutate().request(cleanedRequest).build();
-        
+
         return scrubbedExchange.getPrincipal()
-                .filter(JwtAuthenticationToken.class::isInstance)
-                .cast(JwtAuthenticationToken.class)
-                .map(JwtAuthenticationToken::getToken)
-                .map(jwt -> enrich(scrubbedExchange, jwt))
+                .filter(Authentication.class::isInstance)
+                .cast(Authentication.class)
+                .map(authentication -> enrich(scrubbedExchange, authentication))
                 .defaultIfEmpty(scrubbedExchange)
                 .flatMap(chain::filter);
     }
 
-    /**
-     * Extract userId, username and roles from JWT and puts them into headers.
-     */
-    private ServerWebExchange enrich(ServerWebExchange scrubbedExchange, Jwt jwt) {
-        ServerHttpRequest.Builder requestBuilder = scrubbedExchange.getRequest().mutate();
+    private ServerWebExchange enrich(ServerWebExchange exchange, Authentication authentication) {
+        UserIdentity identity = extractIdentity(authentication);
+        if (identity == null) {
+            return exchange;
+        }
 
-        String userId = jwt.getSubject();
-        String username = jwt.getClaimAsString("preferred_username");
-        String email = jwt.getClaimAsString("email");
-        String roles = extractRoles(jwt);
+        ServerHttpRequest.Builder requestBuilder = exchange.getRequest().mutate();
+        Optional.ofNullable(identity.id()).ifPresent(value -> requestBuilder.header("X-User-Id", value));
+        Optional.ofNullable(identity.username()).ifPresent(value -> requestBuilder.header("X-User-Username", value));
+        Optional.ofNullable(identity.email()).ifPresent(value -> requestBuilder.header("X-User-Email", value));
 
-        Optional.ofNullable(userId).ifPresent(user -> requestBuilder.header("X-User-Id", user));
-        Optional.ofNullable(username).ifPresent(user -> requestBuilder.header("X-User-Username", user));
-        Optional.ofNullable(email).ifPresent(user -> requestBuilder.header("X-User-Email", user));
-
+        String roles = authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .filter(authority -> authority.startsWith("ROLE_"))
+                .distinct()
+                .sorted()
+                .collect(Collectors.joining(","));
         if (!roles.isEmpty()) {
             requestBuilder.header("X-User-Roles", roles);
         }
 
-        log.debug("Enriched request for user: {} (ID: {}), email: {}, roles: {}", username, userId, email, roles);
-
-        return scrubbedExchange.mutate().request(requestBuilder.build()).build();
+        log.debug("Enriched request for user ID {} with roles {}", identity.id(), roles);
+        return exchange.mutate().request(requestBuilder.build()).build();
     }
 
-    /**
-     * Converts Keycloack roles from the JWT into a separated string
-     */
-    private String extractRoles(Jwt jwt) {
-        return Optional.ofNullable(jwt.getClaimAsMap("realm_access"))
-                .map(realmAccess -> realmAccess.get("roles"))
-                .filter(List.class::isInstance)
-                .map(rolesObj -> {
-                    @SuppressWarnings("unchecked")
-                    List<String> rolesList = (List<String>) rolesObj;
-                    return rolesList.stream()
-                            .map(role -> "ROLE_" + role.trim())
-                            .collect(Collectors.joining(","));
-                })
-                .orElse("");
+    private UserIdentity extractIdentity(Authentication authentication) {
+        if (authentication instanceof JwtAuthenticationToken jwtAuthentication) {
+            Jwt jwt = jwtAuthentication.getToken();
+            return new UserIdentity(
+                    jwt.getSubject(),
+                    jwt.getClaimAsString("preferred_username"),
+                    jwt.getClaimAsString("email")
+            );
+        }
+
+        if (authentication.getPrincipal() instanceof OidcUser oidcUser) {
+            return new UserIdentity(
+                    oidcUser.getSubject(),
+                    oidcUser.getPreferredUsername(),
+                    oidcUser.getEmail()
+            );
+        }
+
+        return null;
     }
 
-    /**
-     * Sets the order of this filter (it works after CorrelationFilter)
-     */
     @Override
     public int getOrder() {
         return Ordered.HIGHEST_PRECEDENCE + 1;
+    }
+
+    private record UserIdentity(String id, String username, String email) {
     }
 }
