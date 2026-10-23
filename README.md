@@ -1,71 +1,85 @@
 # 🛡️ Game Ops Platform - API Gateway
 
-The API Gateway is the central entry point for the GameOps Platform. It manages security, request routing, and identity propagation across the microservices ecosystem.
+The API Gateway is the BFF and the only public entry point for the Game Ops Platform. It owns browser authentication, Redis-backed user sessions, route authorization, and trusted user headers for internal services.
 
-## ⚙️ Core Responsibilities
+## Security flow
 
-* **Authentication & JWT Validation:** Validates OIDC tokens issued by Keycloak.
-* **RBAC (Role-Based Access Control):** Enforces security constraints based on JWT claims (e.g., `/admin/**` requires `admin` role).
-* **Request Scrubbing:** Extracts user data from JWT and propagates it to downstream services via HTTP headers.
-* **Routing:** Proxies requests to internal microservices (Main Service, etc.).
+1. The browser opens `GET /oauth2/authorization/keycloak`.
+2. Keycloak authenticates the user and redirects to `/login/oauth2/code/keycloak`.
+3. The Gateway stores the `SecurityContext` and `OAuth2AuthorizedClient` in a Redis `WebSession`.
+4. The browser receives only the persistent `GAME_SESSION` cookie. Access and refresh tokens are not exposed to JavaScript.
+5. Before route authorization, the Gateway refreshes an expiring access token and updates the roles in the session.
+6. Internal services receive trusted `X-User-*` headers after the Gateway removes any client-supplied values.
 
----
+The old Bearer JWT resource-server flow is temporarily supported during migration. Unsafe Bearer requests do not require CSRF because the token is not ambient browser authority. Cookie-session requests require the `X-XSRF-TOKEN` header.
 
-## 🔐 Security & Profiles
+## Browser endpoints
 
-The service uses **Spring Boot Profiles** to handle different environments:
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /oauth2/authorization/keycloak` | Start Keycloak login |
+| `GET /api/session` | Return authentication state and current user |
+| `GET /api/session/csrf` | Create/return the CSRF token |
+| `POST /api/logout` | Invalidate the Gateway session and end the Keycloak session |
 
-| Profile | Description | Issuer Validation |
-| :--- | :--- | :--- |
-| **`docker` (Prod)** | Strict security mode. Requires identical `iss` claim and configuration URI. | **Enabled** |
-| **`dev` (Local)** | Flexible mode for development. Allows tokens from `localhost` while running in Docker. | **Disabled** (Timestamp only) |
+`POST /api/logout` and all other unsafe cookie-authenticated requests must include the CSRF token from the `XSRF-TOKEN` cookie in the `X-XSRF-TOKEN` header.
 
-### Identity Propagation
-The Gateway extracts claims from the JWT and injects the following headers into every downstream request:
-* `X-Request-Id`: Unique correlation ID for tracing.
-* `X-User-Id`: Subject (UUID) from Keycloak.
-* `X-User-Username`: Preferred username.
-* `X-User-Roles`: Comma-separated list of roles (extracted from `realm_access`).
+## Refresh behavior
 
+| Situation | Result |
+| :--- | :--- |
+| Access token is valid and Keycloak is temporarily unavailable | Continue with the current session |
+| Access token is expired and Keycloak is temporarily unavailable | `503`, keep the Redis session and cookie |
+| Refresh token is revoked or returns `invalid_grant` | Remove the authorized client, invalidate the session, return `401` |
+| Required role is missing | `403` |
 
+A short Redis lock prevents two Gateway instances from rotating the same refresh token at the same time.
 
----
+## Identity propagation
 
-## 📡 Routing Configuration
+The Gateway injects these headers into downstream requests:
 
-Routes are defined in `application.yml`:
+- `X-Request-Id`
+- `X-User-Id`
+- `X-User-Username`
+- `X-User-Email`
+- `X-User-Roles`
 
-| Path Pattern | Target Service | Auth Required |
-| :--- | :--- | :--- |
-| `/api/v1/public/**` | Main Service | No |
-| `/api/v1/admin/**` | Main Service | Yes (`ROLE_admin`, `ROLE_superadmin`) |
-| `/api/v1/**` | Main Service | Yes |
-| `/actuator/health` | Gateway (Self) | No |
+Downstream services must not be reachable directly from an untrusted network.
 
----
+## Configuration
 
-## 🛠 Tech Stack
+Required development variables are provided by `game-platform-infra`:
 
-* **Framework:** Spring Boot 3.5
-* **Gateway:** Spring Cloud Gateway (WebFlux)
-* **Security:** Spring Security OAuth2 Resource Server
-* **Token Library:** Nimbus JOSE + JWT
+```text
+GAME_GATEWAY_CLIENT_SECRET
+SPRING_DATA_REDIS_HOST
+SPRING_DATA_REDIS_PORT
+SPRING_DATA_REDIS_PASSWORD
+```
 
----
+Important optional settings:
 
-## 🚀 Local Development
+```text
+APP_SECURITY_FRONTEND_BASE_URL=http://localhost:3000
+APP_SECURITY_KEYCLOAK_LOGOUT_URI=http://localhost:8080/realms/game-realm/protocol/openid-connect/logout
+APP_SECURITY_REFRESH_CLOCK_SKEW=60s
+APP_SECURITY_REFRESH_LOCK_TTL=30s
+APP_SECURITY_REFRESH_REQUEST_TIMEOUT=10s
+SERVER_REACTIVE_SESSION_TIMEOUT=7d
+SERVER_REACTIVE_SESSION_COOKIE_NAME=GAME_SESSION
+SERVER_REACTIVE_SESSION_COOKIE_MAX_AGE=7d
+SERVER_REACTIVE_SESSION_COOKIE_SECURE=false
+```
 
-To run the gateway locally while connecting to Keycloak in Docker:
+The cookie `Max-Age` and Redis session timeout should stay aligned. With the default `7d` values, closing and reopening the browser does not end an otherwise valid session.
 
-1.  Ensure Infrastructure is running: `docker compose up -d`
-2.  Start with `dev` profile:
-    ```bash
-    ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
-    ```
-    *Or via IDE with VM Option:* `-Dspring.profiles.active=dev`
+Production must use HTTPS and a secure `__Host-...` session cookie with `Path=/` and no `Domain` attribute.
 
----
+## Verification
 
-## 🛑 Important Implementation Note
+```bash
+./mvnw -D"maven.compiler.release=17" test
+```
 
-When adding new routes, ensure they are placed **above** the catch-all patterns in `application.yml` to prevent predicate shadowing.
+The release override is needed only on a workstation that currently runs JDK 17. The application and Docker image target Java 21.
