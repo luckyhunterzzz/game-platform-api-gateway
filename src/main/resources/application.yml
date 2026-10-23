@@ -1,11 +1,27 @@
 server:
   port: 8081
+  reactive:
+    session:
+      timeout: ${SERVER_REACTIVE_SESSION_TIMEOUT:7d}
+      cookie:
+        name: ${SERVER_REACTIVE_SESSION_COOKIE_NAME:GAME_SESSION}
+        max-age: ${SERVER_REACTIVE_SESSION_COOKIE_MAX_AGE:7d}
+        http-only: ${SERVER_REACTIVE_SESSION_COOKIE_HTTP_ONLY:true}
+        path: /
+        secure: ${SERVER_REACTIVE_SESSION_COOKIE_SECURE:false}
+        same-site: ${SERVER_REACTIVE_SESSION_COOKIE_SAME_SITE:Lax}
 
 app:
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,https://gameops-platform.dev,https://ru.gameops-platform.dev}
   security:
     additional-issuers: ${APP_SECURITY_ADDITIONAL_ISSUERS:}
+    frontend-base-url: ${APP_SECURITY_FRONTEND_BASE_URL:http://localhost:3000}
+    keycloak-logout-uri: ${APP_SECURITY_KEYCLOAK_LOGOUT_URI:http://localhost:8080/realms/game-realm/protocol/openid-connect/logout}
+    refresh:
+      clock-skew: ${APP_SECURITY_REFRESH_CLOCK_SKEW:60s}
+      lock-ttl: ${APP_SECURITY_REFRESH_LOCK_TTL:30s}
+      request-timeout: ${APP_SECURITY_REFRESH_REQUEST_TIMEOUT:10s}
 
 spring:
   application:
@@ -52,16 +68,38 @@ spring:
                   - Authorization
                   - Content-Type
                   - X-Request-Id
+                  - X-XSRF-TOKEN
                 exposedHeaders:
                   - X-Request-Id
-                allowCredentials: false
+                allowCredentials: true
                 maxAge: 3600
 
   security:
     oauth2:
+      client:
+        registration:
+          keycloak:
+            provider: keycloak
+            client-id: ${GAME_GATEWAY_CLIENT_ID:game-gateway}
+            client-secret: ${GAME_GATEWAY_CLIENT_SECRET:}
+            authorization-grant-type: authorization_code
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+            scope: openid,profile,email
+        provider:
+          keycloak:
+            authorization-uri: ${KEYCLOAK_AUTHORIZATION_URI:http://localhost:8080/realms/game-realm/protocol/openid-connect/auth}
+            token-uri: ${KEYCLOAK_TOKEN_URI:http://localhost:8080/realms/game-realm/protocol/openid-connect/token}
+            user-info-uri: ${KEYCLOAK_USER_INFO_URI:http://localhost:8080/realms/game-realm/protocol/openid-connect/userinfo}
+            jwk-set-uri: ${KEYCLOAK_JWK_SET_URI:http://localhost:8080/realms/game-realm/protocol/openid-connect/certs}
+            user-name-attribute: preferred_username
       resourceserver:
         jwt:
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+
+  session:
+    timeout: ${SPRING_SESSION_TIMEOUT:7d}
+    redis:
+      namespace: ${SPRING_SESSION_REDIS_NAMESPACE:game:gateway:session}
 
 management:
   endpoints:
