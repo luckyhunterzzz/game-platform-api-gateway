@@ -240,7 +240,9 @@ public class SecurityConfig {
     @Bean
     @Profile("dev")
     public ReactiveJwtDecoder devJwtDecoder() {
-        NimbusReactiveJwtDecoder jwtDecoder = NimbusReactiveJwtDecoder.withIssuerLocation(issuerUri).build();
+        NimbusReactiveJwtDecoder jwtDecoder = NimbusReactiveJwtDecoder
+                .withJwkSetUri(buildJwkSetUri(issuerUri))
+                .build();
         jwtDecoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(new JwtTimestampValidator()));
         return jwtDecoder;
     }
