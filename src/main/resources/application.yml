@@ -17,6 +17,8 @@ app:
   security:
     additional-issuers: ${APP_SECURITY_ADDITIONAL_ISSUERS:}
     frontend-base-url: ${APP_SECURITY_FRONTEND_BASE_URL:http://localhost:3000}
+    ru-frontend-base-url: ${APP_SECURITY_RU_FRONTEND_BASE_URL:https://ru.gameops-platform.dev}
+    ru-api-base-url: ${APP_SECURITY_RU_API_BASE_URL:https://ru-api.gameops-platform.dev}
     keycloak-logout-uri: ${APP_SECURITY_KEYCLOAK_LOGOUT_URI:http://localhost:8080/realms/game-realm/protocol/openid-connect/logout}
     refresh:
       clock-skew: ${APP_SECURITY_REFRESH_CLOCK_SKEW:60s}
