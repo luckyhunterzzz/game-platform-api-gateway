@@ -137,6 +137,7 @@ class OAuth2SessionRefreshWebFilterTest {
 
         assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
         assertThat(exchange.getResponse().getHeaders().getFirst("Retry-After")).isEqualTo("1");
+        assertThat(exchange.getResponse().getHeaders().getFirst("X-Auth-Refresh-Pending")).isEqualTo("true");
         assertThat(chainCalls).hasValue(0);
     }
 

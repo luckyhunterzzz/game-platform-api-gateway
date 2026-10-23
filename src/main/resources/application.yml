@@ -71,6 +71,7 @@ spring:
                   - X-XSRF-TOKEN
                 exposedHeaders:
                   - X-Request-Id
+                  - X-Auth-Refresh-Pending
                 allowCredentials: true
                 maxAge: 3600
 

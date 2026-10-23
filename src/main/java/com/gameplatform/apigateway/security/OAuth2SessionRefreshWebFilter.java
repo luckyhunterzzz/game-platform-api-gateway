@@ -35,6 +35,7 @@ import java.util.Set;
 public class OAuth2SessionRefreshWebFilter implements WebFilter {
 
     private static final String ROLE_PREFIX = "ROLE_";
+    private static final String REFRESH_PENDING_HEADER = "X-Auth-Refresh-Pending";
     private static final Set<String> REFRESH_BYPASS_PATHS = Set.of(
             "/api/session/csrf",
             "/api/logout"
@@ -140,7 +141,7 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     return refreshWithLock(exchange, chain, authentication, client).thenReturn(true);
                 })
                 .switchIfEmpty(Mono.defer(() -> invalidateSession(exchange, authentication)
-                        .then(writeStatus(exchange, HttpStatus.UNAUTHORIZED, true))
+                        .then(writeStatus(exchange, HttpStatus.UNAUTHORIZED, true, false))
                         .thenReturn(true)))
                 .flatMap(processed -> processed ? Mono.empty() : chain.filter(exchange));
     }
@@ -168,7 +169,7 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     if (isAccessTokenValid(currentClient)) {
                         return chain.filter(exchange);
                     }
-                    return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false);
+                    return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, false);
                 });
     }
 
@@ -254,7 +255,12 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
             RefreshOutcome outcome
     ) {
         if (outcome.status() != null) {
-            return writeStatus(exchange, outcome.status(), outcome.clearCookies());
+            return writeStatus(
+                    exchange,
+                    outcome.status(),
+                    outcome.clearCookies(),
+                    outcome.refreshPending()
+            );
         }
         if (outcome.context() == null) {
             return chain.filter(exchange);
@@ -268,13 +274,21 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                 .contextWrite(ReactiveSecurityContextHolder.withSecurityContext(Mono.just(outcome.context())));
     }
 
-    private Mono<Void> writeStatus(ServerWebExchange exchange, HttpStatus status, boolean clearCookies) {
+    private Mono<Void> writeStatus(
+            ServerWebExchange exchange,
+            HttpStatus status,
+            boolean clearCookies,
+            boolean refreshPending
+    ) {
         if (clearCookies) {
             exchange.getResponse().addCookie(expiredCookie(sessionCookieName, true));
             exchange.getResponse().addCookie(expiredCookie("XSRF-TOKEN", false));
         }
         if (status == HttpStatus.SERVICE_UNAVAILABLE) {
             exchange.getResponse().getHeaders().set("Retry-After", "1");
+        }
+        if (refreshPending) {
+            exchange.getResponse().getHeaders().set(REFRESH_PENDING_HEADER, "true");
         }
         exchange.getResponse().setStatusCode(status);
         return exchange.getResponse().setComplete();
@@ -323,7 +337,7 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
             return RefreshOutcome.useCurrent();
         }
         log.warn("OAuth2 refresh is already running and the current access token has expired");
-        return RefreshOutcome.unavailable();
+        return RefreshOutcome.refreshInProgress();
     }
 
     private boolean requiresRefresh(OAuth2AuthorizedClient client) {
@@ -348,22 +362,31 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
         return false;
     }
 
-    private record RefreshOutcome(SecurityContext context, HttpStatus status, boolean clearCookies) {
+    private record RefreshOutcome(
+            SecurityContext context,
+            HttpStatus status,
+            boolean clearCookies,
+            boolean refreshPending
+    ) {
 
         private static RefreshOutcome refreshed(SecurityContext context) {
-            return new RefreshOutcome(context, null, false);
+            return new RefreshOutcome(context, null, false, false);
         }
 
         private static RefreshOutcome useCurrent() {
-            return new RefreshOutcome(null, null, false);
+            return new RefreshOutcome(null, null, false, false);
         }
 
         private static RefreshOutcome unauthorized() {
-            return new RefreshOutcome(null, HttpStatus.UNAUTHORIZED, true);
+            return new RefreshOutcome(null, HttpStatus.UNAUTHORIZED, true, false);
         }
 
         private static RefreshOutcome unavailable() {
-            return new RefreshOutcome(null, HttpStatus.SERVICE_UNAVAILABLE, false);
+            return new RefreshOutcome(null, HttpStatus.SERVICE_UNAVAILABLE, false, false);
+        }
+
+        private static RefreshOutcome refreshInProgress() {
+            return new RefreshOutcome(null, HttpStatus.SERVICE_UNAVAILABLE, false, true);
         }
     }
 }
