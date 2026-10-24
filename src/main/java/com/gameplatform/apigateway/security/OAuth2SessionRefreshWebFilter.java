@@ -162,14 +162,14 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                         authentication,
                         currentClient
                 ))
-                .flatMap(outcome -> applyOutcome(exchange, chain, outcome))
                 .onErrorResume(error -> {
                     log.warn("OAuth2 refresh infrastructure failed: {}", error.getClass().getSimpleName());
                     if (isAccessTokenValid(currentClient)) {
-                        return chain.filter(exchange);
+                        return Mono.just(RefreshOutcome.useCurrent());
                     }
-                    return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, false);
-                });
+                    return Mono.just(RefreshOutcome.unavailable());
+                })
+                .flatMap(outcome -> applyOutcome(exchange, chain, outcome));
     }
 
     private Mono<RefreshOutcome> sharedRefresh(
@@ -235,10 +235,24 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     Collection<GrantedAuthority> roles = authoritiesExtractor.extract(jwt.getClaims());
                     OAuth2AuthenticationToken refreshedAuthentication = withAuthorities(authentication, roles);
                     SecurityContext context = new SecurityContextImpl(refreshedAuthentication);
-                    return securityContextRepository.save(exchange, context)
-                            .then(exchange.getSession().flatMap(session -> session.save()))
-                            .thenReturn(RefreshOutcome.refreshed(context));
+                    return saveRefreshedSession(exchange, refreshedClient, context)
+                            .thenReturn(RefreshOutcome.refreshed(refreshedClient, context));
                 });
+    }
+
+    private Mono<Void> saveRefreshedSession(
+            ServerWebExchange exchange,
+            OAuth2AuthorizedClient refreshedClient,
+            SecurityContext context
+    ) {
+        return authorizedClientRepository
+                .saveAuthorizedClient(
+                        refreshedClient,
+                        context.getAuthentication(),
+                        exchange
+                )
+                .then(securityContextRepository.save(exchange, context))
+                .then(exchange.getSession().flatMap(session -> session.save()));
     }
 
     private Mono<RefreshOutcome> handleRefreshFailure(
@@ -299,8 +313,20 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                 exchange,
                 Mono.just(outcome.context())
         );
-        return chain.filter(refreshedExchange)
-                .contextWrite(ReactiveSecurityContextHolder.withSecurityContext(Mono.just(outcome.context())));
+        return saveRefreshedSession(exchange, outcome.authorizedClient(), outcome.context())
+                .thenReturn(true)
+                .onErrorResume(error -> {
+                    log.warn("Failed to persist refreshed OAuth2 session: {}", error.getClass().getSimpleName());
+                    return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, false)
+                            .thenReturn(false);
+                })
+                .flatMap(saved -> saved
+                        ? chain.filter(refreshedExchange)
+                                .contextWrite(ReactiveSecurityContextHolder.withSecurityContext(
+                                        Mono.just(outcome.context())
+                                ))
+                        : Mono.empty()
+                );
     }
 
     private Mono<Void> writeStatus(
@@ -392,30 +418,34 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
     }
 
     private record RefreshOutcome(
+            OAuth2AuthorizedClient authorizedClient,
             SecurityContext context,
             HttpStatus status,
             boolean clearCookies,
             boolean refreshPending
     ) {
 
-        private static RefreshOutcome refreshed(SecurityContext context) {
-            return new RefreshOutcome(context, null, false, false);
+        private static RefreshOutcome refreshed(
+                OAuth2AuthorizedClient authorizedClient,
+                SecurityContext context
+        ) {
+            return new RefreshOutcome(authorizedClient, context, null, false, false);
         }
 
         private static RefreshOutcome useCurrent() {
-            return new RefreshOutcome(null, null, false, false);
+            return new RefreshOutcome(null, null, null, false, false);
         }
 
         private static RefreshOutcome unauthorized() {
-            return new RefreshOutcome(null, HttpStatus.UNAUTHORIZED, true, false);
+            return new RefreshOutcome(null, null, HttpStatus.UNAUTHORIZED, true, false);
         }
 
         private static RefreshOutcome unavailable() {
-            return new RefreshOutcome(null, HttpStatus.SERVICE_UNAVAILABLE, false, false);
+            return new RefreshOutcome(null, null, HttpStatus.SERVICE_UNAVAILABLE, false, false);
         }
 
         private static RefreshOutcome refreshInProgress() {
-            return new RefreshOutcome(null, HttpStatus.SERVICE_UNAVAILABLE, false, true);
+            return new RefreshOutcome(null, null, HttpStatus.SERVICE_UNAVAILABLE, false, true);
         }
     }
 }

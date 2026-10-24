@@ -4,7 +4,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
-import org.springframework.mock.web.server.MockWebSession;
 import org.springframework.mock.web.server.MockServerWebExchange;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.Authentication;
@@ -21,6 +20,7 @@ import org.springframework.security.oauth2.core.user.DefaultOAuth2User;
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.web.server.context.ServerSecurityContextRepository;
+import org.springframework.web.server.WebSession;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -62,6 +63,7 @@ class OAuth2SessionRefreshWebFilterTest {
         lockService = mock(RedisRefreshLockService.class);
         jwtDecoder = mock(ReactiveJwtDecoder.class);
         securityContextRepository = mock(ServerSecurityContextRepository.class);
+        when(clientRepository.saveAuthorizedClient(any(), any(), any())).thenReturn(Mono.empty());
         filter = new OAuth2SessionRefreshWebFilter(
                 clientManager,
                 clientRepository,
@@ -150,9 +152,10 @@ class OAuth2SessionRefreshWebFilterTest {
         OAuth2AuthenticationToken authentication = authentication();
         OAuth2AuthorizedClient currentClient = authorizedClient(NOW.minusSeconds(1));
         OAuth2AuthorizedClient refreshedClient = authorizedClient(NOW.plusSeconds(900));
-        MockWebSession session = new MockWebSession();
-        MockServerWebExchange firstExchange = exchange(authentication, session);
-        MockServerWebExchange secondExchange = exchange(authentication, session);
+        WebSession firstSession = session("shared-session");
+        WebSession secondSession = session("shared-session");
+        MockServerWebExchange firstExchange = exchange(authentication, firstSession);
+        MockServerWebExchange secondExchange = exchange(authentication, secondSession);
         RedisRefreshLockService.RefreshLock lock = new RedisRefreshLockService.RefreshLock("lock", "owner");
         Sinks.One<OAuth2AuthorizedClient> refreshResult = Sinks.one();
         AtomicInteger chainCalls = new AtomicInteger();
@@ -191,6 +194,42 @@ class OAuth2SessionRefreshWebFilterTest {
         verify(clientManager, times(1)).authorize(any());
         verify(lockService, times(1)).tryAcquire(anyString(), any());
         verify(lockService, times(1)).release(lock);
+        verify(clientRepository, times(3)).saveAuthorizedClient(any(), any(), any());
+        verify(firstSession, times(2)).save();
+        verify(secondSession, times(1)).save();
+    }
+
+    @Test
+    void doesNotRunTheRequestChainTwiceWhenDownstreamFailsAfterRefresh() {
+        OAuth2AuthenticationToken authentication = authentication();
+        OAuth2AuthorizedClient currentClient = authorizedClient(NOW.minusSeconds(1));
+        OAuth2AuthorizedClient refreshedClient = authorizedClient(NOW.plusSeconds(900));
+        MockServerWebExchange exchange = exchange(authentication);
+        RedisRefreshLockService.RefreshLock lock = new RedisRefreshLockService.RefreshLock("lock", "owner");
+        AtomicInteger chainCalls = new AtomicInteger();
+        IllegalStateException downstreamFailure = new IllegalStateException("downstream failed");
+        Jwt refreshedJwt = Jwt.withTokenValue("refreshed-access-token")
+                .header("alg", "RS256")
+                .subject("user-1")
+                .issuedAt(NOW)
+                .expiresAt(NOW.plusSeconds(900))
+                .claim("realm_access", Map.of("roles", List.of("admin")))
+                .build();
+
+        when(clientRepository.<OAuth2AuthorizedClient>loadAuthorizedClient(anyString(), any(), any()))
+                .thenReturn(Mono.just(currentClient));
+        when(lockService.tryAcquire(anyString(), any())).thenReturn(Mono.just(lock));
+        when(lockService.release(lock)).thenReturn(Mono.empty());
+        when(clientManager.authorize(any())).thenReturn(Mono.just(refreshedClient));
+        when(jwtDecoder.decode("access-token")).thenReturn(Mono.just(refreshedJwt));
+        when(securityContextRepository.save(any(), any())).thenReturn(Mono.empty());
+
+        assertThatThrownBy(() -> filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.error(downstreamFailure);
+        }).block()).isSameAs(downstreamFailure);
+
+        assertThat(chainCalls).hasValue(1);
     }
 
     @Test
@@ -271,7 +310,8 @@ class OAuth2SessionRefreshWebFilterTest {
                 .extracting(authority -> authority.getAuthority())
                 .contains("ROLE_admin")
                 .doesNotContain("ROLE_user");
-        verify(securityContextRepository).save(any(), any());
+        verify(clientRepository, times(2)).saveAuthorizedClient(any(), any(), any());
+        verify(securityContextRepository, times(2)).save(any(), any());
         verify(lockService).release(lock);
     }
 
@@ -283,12 +323,19 @@ class OAuth2SessionRefreshWebFilterTest {
 
     private MockServerWebExchange exchange(
             OAuth2AuthenticationToken authentication,
-            MockWebSession session
+            WebSession session
     ) {
         return MockServerWebExchange.builder(MockServerHttpRequest.get("/api/v1/profile/me"))
                 .session(session)
                 .principal(authentication)
                 .build();
+    }
+
+    private WebSession session(String id) {
+        WebSession session = mock(WebSession.class);
+        when(session.getId()).thenReturn(id);
+        when(session.save()).thenReturn(Mono.empty());
+        return session;
     }
 
     private OAuth2AuthenticationToken authentication() {
