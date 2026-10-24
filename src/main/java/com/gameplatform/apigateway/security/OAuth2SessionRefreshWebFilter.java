@@ -30,6 +30,8 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Slf4j
 public class OAuth2SessionRefreshWebFilter implements WebFilter {
@@ -53,6 +55,7 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
     private final String sessionCookieName;
     private final boolean secureCookie;
     private final Clock clock;
+    private final ConcurrentMap<String, Mono<RefreshOutcome>> inFlightRefreshes = new ConcurrentHashMap<>();
 
     public OAuth2SessionRefreshWebFilter(
             ReactiveOAuth2AuthorizedClientManager authorizedClientManager,
@@ -153,16 +156,12 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
             OAuth2AuthorizedClient currentClient
     ) {
         return exchange.getSession()
-                .flatMap(session -> refreshLockService.tryAcquire(session.getId(), lockTtl)
-                        .flatMap(lock -> Mono.usingWhen(
-                                Mono.just(lock),
-                                ignored -> refreshAuthorizedClient(exchange, authentication, currentClient),
-                                refreshLockService::release,
-                                (ignored, error) -> refreshLockService.release(ignored),
-                                refreshLockService::release
-                        ))
-                        .switchIfEmpty(Mono.fromSupplier(() -> lockBusyOutcome(currentClient)))
-                )
+                .flatMap(session -> sharedRefresh(
+                        session.getId(),
+                        exchange,
+                        authentication,
+                        currentClient
+                ))
                 .flatMap(outcome -> applyOutcome(exchange, chain, outcome))
                 .onErrorResume(error -> {
                     log.warn("OAuth2 refresh infrastructure failed: {}", error.getClass().getSimpleName());
@@ -171,6 +170,36 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     }
                     return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, false);
                 });
+    }
+
+    private Mono<RefreshOutcome> sharedRefresh(
+            String sessionId,
+            ServerWebExchange exchange,
+            OAuth2AuthenticationToken authentication,
+            OAuth2AuthorizedClient currentClient
+    ) {
+        return inFlightRefreshes.computeIfAbsent(sessionId, ignored ->
+                refreshWithDistributedLock(sessionId, exchange, authentication, currentClient)
+                        .doFinally(signalType -> inFlightRefreshes.remove(sessionId))
+                        .cache()
+        );
+    }
+
+    private Mono<RefreshOutcome> refreshWithDistributedLock(
+            String sessionId,
+            ServerWebExchange exchange,
+            OAuth2AuthenticationToken authentication,
+            OAuth2AuthorizedClient currentClient
+    ) {
+        return refreshLockService.tryAcquire(sessionId, lockTtl)
+                .flatMap(lock -> Mono.usingWhen(
+                        Mono.just(lock),
+                        ignored -> refreshAuthorizedClient(exchange, authentication, currentClient),
+                        refreshLockService::release,
+                        (ignored, error) -> refreshLockService.release(ignored),
+                        refreshLockService::release
+                ))
+                .switchIfEmpty(Mono.fromSupplier(() -> lockBusyOutcome(currentClient)));
     }
 
     private Mono<RefreshOutcome> refreshAuthorizedClient(
