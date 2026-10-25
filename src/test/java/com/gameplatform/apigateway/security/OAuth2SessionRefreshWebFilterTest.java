@@ -63,7 +63,6 @@ class OAuth2SessionRefreshWebFilterTest {
         lockService = mock(RedisRefreshLockService.class);
         jwtDecoder = mock(ReactiveJwtDecoder.class);
         securityContextRepository = mock(ServerSecurityContextRepository.class);
-        when(clientRepository.saveAuthorizedClient(any(), any(), any())).thenReturn(Mono.empty());
         filter = new OAuth2SessionRefreshWebFilter(
                 clientManager,
                 clientRepository,
@@ -148,7 +147,30 @@ class OAuth2SessionRefreshWebFilterTest {
     }
 
     @Test
-    void sharesOneRefreshAcrossConcurrentRequestsForTheSameSession() {
+    void usesStillValidTokenWithoutWritingSessionWhenRefreshLockIsBusy() {
+        OAuth2AuthenticationToken authentication = authentication();
+        OAuth2AuthorizedClient client = authorizedClient(NOW.plusSeconds(30));
+        WebSession session = session("shared-session");
+        MockServerWebExchange exchange = exchange(authentication, session);
+        AtomicInteger chainCalls = new AtomicInteger();
+        when(clientRepository.<OAuth2AuthorizedClient>loadAuthorizedClient(anyString(), any(), any()))
+                .thenReturn(Mono.just(client));
+        when(lockService.tryAcquire(anyString(), any())).thenReturn(Mono.empty());
+
+        filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(exchange.getResponse().getStatusCode()).isNull();
+        assertThat(chainCalls).hasValue(1);
+        verify(clientManager, never()).authorize(any());
+        verify(securityContextRepository, never()).save(any(), any());
+        verify(session, never()).save();
+    }
+
+    @Test
+    void allowsOnlyTheLockOwnerToRefreshAndPersistTheSession() {
         OAuth2AuthenticationToken authentication = authentication();
         OAuth2AuthorizedClient currentClient = authorizedClient(NOW.minusSeconds(1));
         OAuth2AuthorizedClient refreshedClient = authorizedClient(NOW.plusSeconds(900));
@@ -169,7 +191,8 @@ class OAuth2SessionRefreshWebFilterTest {
 
         when(clientRepository.<OAuth2AuthorizedClient>loadAuthorizedClient(anyString(), any(), any()))
                 .thenReturn(Mono.just(currentClient));
-        when(lockService.tryAcquire(anyString(), any())).thenReturn(Mono.just(lock));
+        when(lockService.tryAcquire(anyString(), any()))
+                .thenReturn(Mono.just(lock), Mono.empty());
         when(lockService.release(lock)).thenReturn(Mono.empty());
         when(clientManager.authorize(any())).thenReturn(refreshResult.asMono());
         when(jwtDecoder.decode("access-token")).thenReturn(Mono.just(refreshedJwt));
@@ -188,15 +211,18 @@ class OAuth2SessionRefreshWebFilterTest {
         refreshResult.tryEmitValue(refreshedClient);
         requests.join();
 
-        assertThat(chainCalls).hasValue(2);
+        assertThat(chainCalls).hasValue(1);
         assertThat(firstExchange.getResponse().getStatusCode()).isNull();
-        assertThat(secondExchange.getResponse().getStatusCode()).isNull();
+        assertThat(secondExchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(secondExchange.getResponse().getHeaders().getFirst("X-Auth-Refresh-Pending"))
+                .isEqualTo("true");
         verify(clientManager, times(1)).authorize(any());
-        verify(lockService, times(1)).tryAcquire(anyString(), any());
+        verify(lockService, times(2)).tryAcquire(anyString(), any());
         verify(lockService, times(1)).release(lock);
-        verify(clientRepository, times(3)).saveAuthorizedClient(any(), any(), any());
-        verify(firstSession, times(2)).save();
-        verify(secondSession, times(1)).save();
+        verify(clientRepository, never()).saveAuthorizedClient(any(), any(), any());
+        verify(securityContextRepository, times(1)).save(any(), any());
+        verify(firstSession, times(1)).save();
+        verify(secondSession, never()).save();
     }
 
     @Test
@@ -310,8 +336,8 @@ class OAuth2SessionRefreshWebFilterTest {
                 .extracting(authority -> authority.getAuthority())
                 .contains("ROLE_admin")
                 .doesNotContain("ROLE_user");
-        verify(clientRepository, times(2)).saveAuthorizedClient(any(), any(), any());
-        verify(securityContextRepository, times(2)).save(any(), any());
+        verify(clientRepository, never()).saveAuthorizedClient(any(), any(), any());
+        verify(securityContextRepository, times(1)).save(any(), any());
         verify(lockService).release(lock);
     }
 
