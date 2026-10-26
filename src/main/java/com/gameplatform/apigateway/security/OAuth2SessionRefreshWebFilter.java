@@ -140,8 +140,7 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     }
                     return refreshWithLock(exchange, chain, authentication, client).thenReturn(true);
                 })
-                .switchIfEmpty(Mono.defer(() -> invalidateSession(exchange, authentication)
-                        .then(writeStatus(exchange, HttpStatus.UNAUTHORIZED, true, false))
+                .switchIfEmpty(Mono.defer(() -> handleMissingAuthorizedClient(exchange, authentication)
                         .thenReturn(true)))
                 .flatMap(processed -> processed ? Mono.empty() : chain.filter(exchange));
     }
@@ -180,7 +179,12 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     log.debug("OAuth2 refresh lock acquired: session={}", sessionFingerprint(sessionId));
                     return Mono.usingWhen(
                             Mono.just(lock),
-                            ignored -> refreshAuthorizedClient(exchange, authentication, currentClient),
+                            ignored -> refreshAsLockOwner(
+                                    sessionId,
+                                    exchange,
+                                    authentication,
+                                    currentClient
+                            ),
                             refreshLockService::release,
                             (ignored, error) -> refreshLockService.release(ignored),
                             refreshLockService::release
@@ -190,6 +194,34 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                     log.debug("OAuth2 refresh lock is busy: session={}", sessionFingerprint(sessionId));
                     return lockBusyOutcome(currentClient);
                 }));
+    }
+
+    private Mono<RefreshOutcome> refreshAsLockOwner(
+            String sessionId,
+            ServerWebExchange exchange,
+            OAuth2AuthenticationToken authentication,
+            OAuth2AuthorizedClient currentClient
+    ) {
+        return refreshLockService.wasRecentlyRefreshed(sessionId)
+                .flatMap(recentlyRefreshed -> {
+                    if (recentlyRefreshed) {
+                        log.debug(
+                                "OAuth2 refresh already completed for a stale request: session={}",
+                                sessionFingerprint(sessionId)
+                        );
+                        return Mono.just(RefreshOutcome.refreshInProgress());
+                    }
+
+                    return refreshAuthorizedClient(exchange, authentication, currentClient)
+                            .flatMap(outcome -> {
+                                if (outcome.context() == null) {
+                                    return Mono.just(outcome);
+                                }
+
+                                return refreshLockService.markRecentlyRefreshed(sessionId, lockTtl)
+                                        .thenReturn(outcome);
+                            });
+                });
     }
 
     private Mono<RefreshOutcome> refreshAuthorizedClient(
@@ -265,6 +297,40 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
 
         log.warn("OAuth2 refresh failed after access token expiration: {}", error.getClass().getSimpleName());
         return Mono.just(RefreshOutcome.unavailable());
+    }
+
+    private Mono<Void> handleMissingAuthorizedClient(
+            ServerWebExchange exchange,
+            OAuth2AuthenticationToken authentication
+    ) {
+        return exchange.getSession()
+                .flatMap(session -> Mono.zip(
+                                refreshLockService.isRefreshInProgress(session.getId()),
+                                refreshLockService.wasRecentlyRefreshed(session.getId())
+                        )
+                        .flatMap(refreshState -> {
+                            if (refreshState.getT1() || refreshState.getT2()) {
+                                log.warn(
+                                        "OAuth2 authorized client is temporarily unavailable during refresh: session={}",
+                                        sessionFingerprint(session.getId())
+                                );
+                                return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, true);
+                            }
+
+                            log.warn(
+                                    "OAuth2 authorized client is missing; invalidating the user session: session={}",
+                                    sessionFingerprint(session.getId())
+                            );
+                            return invalidateSession(exchange, authentication)
+                                    .then(writeStatus(exchange, HttpStatus.UNAUTHORIZED, true, false));
+                        }))
+                .onErrorResume(error -> {
+                    log.warn(
+                            "Failed to verify OAuth2 refresh state for a missing authorized client: {}",
+                            error.getClass().getSimpleName()
+                    );
+                    return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, true);
+                });
     }
 
     private Mono<Void> invalidateSession(ServerWebExchange exchange, OAuth2AuthenticationToken authentication) {

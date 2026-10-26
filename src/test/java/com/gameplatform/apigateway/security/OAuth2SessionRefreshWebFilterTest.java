@@ -63,6 +63,9 @@ class OAuth2SessionRefreshWebFilterTest {
         lockService = mock(RedisRefreshLockService.class);
         jwtDecoder = mock(ReactiveJwtDecoder.class);
         securityContextRepository = mock(ServerSecurityContextRepository.class);
+        when(lockService.isRefreshInProgress(anyString())).thenReturn(Mono.just(false));
+        when(lockService.wasRecentlyRefreshed(anyString())).thenReturn(Mono.just(false));
+        when(lockService.markRecentlyRefreshed(anyString(), any())).thenReturn(Mono.empty());
         filter = new OAuth2SessionRefreshWebFilter(
                 clientManager,
                 clientRepository,
@@ -223,6 +226,82 @@ class OAuth2SessionRefreshWebFilterTest {
         verify(securityContextRepository, times(1)).save(any(), any());
         verify(firstSession, times(1)).save();
         verify(secondSession, never()).save();
+    }
+
+    @Test
+    void doesNotRefreshAStaleClientAgainAfterAnotherRequestCompletedRefresh() {
+        OAuth2AuthenticationToken authentication = authentication();
+        OAuth2AuthorizedClient staleClient = authorizedClient(NOW.minusSeconds(1));
+        OAuth2AuthorizedClient refreshedClient = authorizedClient(NOW.plusSeconds(900));
+        WebSession firstSession = session("shared-session");
+        WebSession secondSession = session("shared-session");
+        MockServerWebExchange firstExchange = exchange(authentication, firstSession);
+        MockServerWebExchange secondExchange = exchange(authentication, secondSession);
+        RedisRefreshLockService.RefreshLock firstLock =
+                new RedisRefreshLockService.RefreshLock("lock", "owner-1");
+        RedisRefreshLockService.RefreshLock secondLock =
+                new RedisRefreshLockService.RefreshLock("lock", "owner-2");
+        AtomicInteger chainCalls = new AtomicInteger();
+        Jwt refreshedJwt = Jwt.withTokenValue("refreshed-access-token")
+                .header("alg", "RS256")
+                .subject("user-1")
+                .issuedAt(NOW)
+                .expiresAt(NOW.plusSeconds(900))
+                .claim("realm_access", Map.of("roles", List.of("admin")))
+                .build();
+
+        when(clientRepository.<OAuth2AuthorizedClient>loadAuthorizedClient(anyString(), any(), any()))
+                .thenReturn(Mono.just(staleClient));
+        when(lockService.tryAcquire(anyString(), any()))
+                .thenReturn(Mono.just(firstLock), Mono.just(secondLock));
+        when(lockService.wasRecentlyRefreshed(anyString()))
+                .thenReturn(Mono.just(false), Mono.just(true));
+        when(lockService.release(firstLock)).thenReturn(Mono.empty());
+        when(lockService.release(secondLock)).thenReturn(Mono.empty());
+        when(clientManager.authorize(any())).thenReturn(Mono.just(refreshedClient));
+        when(jwtDecoder.decode("access-token")).thenReturn(Mono.just(refreshedJwt));
+        when(securityContextRepository.save(any(), any())).thenReturn(Mono.empty());
+
+        filter.filter(firstExchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+        filter.filter(secondExchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(chainCalls).hasValue(1);
+        assertThat(secondExchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(secondExchange.getResponse().getHeaders().getFirst("X-Auth-Refresh-Pending"))
+                .isEqualTo("true");
+        verify(clientManager, times(1)).authorize(any());
+        verify(lockService, times(1)).markRecentlyRefreshed("shared-session", Duration.ofSeconds(30));
+        verify(firstSession, times(1)).save();
+        verify(secondSession, never()).save();
+    }
+
+    @Test
+    void keepsSessionWhenAuthorizedClientIsTemporarilyMissingDuringRefresh() {
+        OAuth2AuthenticationToken authentication = authentication();
+        WebSession session = session("shared-session");
+        MockServerWebExchange exchange = exchange(authentication, session);
+        AtomicInteger chainCalls = new AtomicInteger();
+        when(clientRepository.<OAuth2AuthorizedClient>loadAuthorizedClient(anyString(), any(), any()))
+                .thenReturn(Mono.empty());
+        when(lockService.isRefreshInProgress("shared-session")).thenReturn(Mono.just(true));
+
+        filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(exchange.getResponse().getHeaders().getFirst("X-Auth-Refresh-Pending"))
+                .isEqualTo("true");
+        assertThat(chainCalls).hasValue(0);
+        verify(clientRepository, never()).removeAuthorizedClient(anyString(), any(), any());
+        verify(session, never()).invalidate();
     }
 
     @Test
