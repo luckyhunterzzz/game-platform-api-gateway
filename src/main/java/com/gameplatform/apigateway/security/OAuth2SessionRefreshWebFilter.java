@@ -122,8 +122,39 @@ public class OAuth2SessionRefreshWebFilter implements WebFilter {
                 .filter(OAuth2AuthenticationToken.class::isInstance)
                 .cast(OAuth2AuthenticationToken.class)
                 .flatMap(authentication -> refreshIfRequired(exchange, chain, authentication).thenReturn(true))
-                .defaultIfEmpty(false)
-                .flatMap(processed -> processed ? Mono.empty() : chain.filter(exchange));
+                .switchIfEmpty(Mono.defer(() -> handleMissingPrincipal(exchange, chain).thenReturn(true)))
+                .then();
+    }
+
+    private Mono<Void> handleMissingPrincipal(ServerWebExchange exchange, WebFilterChain chain) {
+        if (exchange.getRequest().getCookies().getFirst(sessionCookieName) == null) {
+            return chain.filter(exchange);
+        }
+
+        return exchange.getSession()
+                .flatMap(session -> Mono.zip(
+                                refreshLockService.isRefreshInProgress(session.getId()),
+                                refreshLockService.wasRecentlyRefreshed(session.getId())
+                        )
+                        .map(refreshState -> refreshState.getT1() || refreshState.getT2())
+                        .onErrorResume(error -> {
+                            log.warn(
+                                    "Failed to verify OAuth2 refresh state for a missing principal: {}",
+                                    error.getClass().getSimpleName()
+                            );
+                            return Mono.just(true);
+                        })
+                        .flatMap(refreshPending -> {
+                            if (refreshPending) {
+                                log.warn(
+                                        "OAuth2 principal is temporarily unavailable during refresh: session={}",
+                                        sessionFingerprint(session.getId())
+                                );
+                                return writeStatus(exchange, HttpStatus.SERVICE_UNAVAILABLE, false, true);
+                            }
+
+                            return chain.filter(exchange);
+                        }));
     }
 
     private Mono<Void> refreshIfRequired(

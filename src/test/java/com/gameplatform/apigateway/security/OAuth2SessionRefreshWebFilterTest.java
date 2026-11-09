@@ -2,6 +2,7 @@ package com.gameplatform.apigateway.security;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
@@ -126,6 +127,85 @@ class OAuth2SessionRefreshWebFilterTest {
         assertThat(chainCalls).hasValue(2);
         verify(clientRepository, never()).loadAuthorizedClient(anyString(), any(), any());
         verify(clientManager, never()).authorize(any());
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenPrincipalIsMissingDuringRefresh() {
+        WebSession session = session("shared-session");
+        MockServerWebExchange exchange = exchangeWithoutPrincipal(session);
+        AtomicInteger chainCalls = new AtomicInteger();
+        when(lockService.isRefreshInProgress("shared-session")).thenReturn(Mono.just(true));
+
+        filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(exchange.getResponse().getHeaders().getFirst("Retry-After")).isEqualTo("1");
+        assertThat(exchange.getResponse().getHeaders().getFirst("X-Auth-Refresh-Pending")).isEqualTo("true");
+        assertThat(chainCalls).hasValue(0);
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenPrincipalIsMissingImmediatelyAfterRefresh() {
+        WebSession session = session("shared-session");
+        MockServerWebExchange exchange = exchangeWithoutPrincipal(session);
+        AtomicInteger chainCalls = new AtomicInteger();
+        when(lockService.wasRecentlyRefreshed("shared-session")).thenReturn(Mono.just(true));
+
+        filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(exchange.getResponse().getHeaders().getFirst("X-Auth-Refresh-Pending")).isEqualTo("true");
+        assertThat(chainCalls).hasValue(0);
+    }
+
+    @Test
+    void passesRequestThroughWhenPrincipalIsMissingOutsideRefresh() {
+        WebSession session = session("shared-session");
+        MockServerWebExchange exchange = exchangeWithoutPrincipal(session);
+        AtomicInteger chainCalls = new AtomicInteger();
+
+        filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(exchange.getResponse().getStatusCode()).isNull();
+        assertThat(chainCalls).hasValue(1);
+    }
+
+    @Test
+    void doesNotInspectRefreshStateForAnonymousRequestWithoutSessionCookie() {
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/api/v1/public/heroes").build()
+        );
+        AtomicInteger chainCalls = new AtomicInteger();
+
+        filter.filter(exchange, ignored -> {
+            chainCalls.incrementAndGet();
+            return Mono.empty();
+        }).block();
+
+        assertThat(chainCalls).hasValue(1);
+        verify(lockService, never()).isRefreshInProgress(anyString());
+        verify(lockService, never()).wasRecentlyRefreshed(anyString());
+    }
+
+    @Test
+    void propagatesDownstreamFailureWhenPrincipalIsMissingOutsideRefresh() {
+        WebSession session = session("shared-session");
+        MockServerWebExchange exchange = exchangeWithoutPrincipal(session);
+        IllegalStateException downstreamFailure = new IllegalStateException("downstream failed");
+
+        assertThatThrownBy(() -> filter.filter(exchange, ignored -> Mono.error(downstreamFailure)).block())
+                .isSameAs(downstreamFailure);
+
+        assertThat(exchange.getResponse().getStatusCode()).isNull();
     }
 
     @Test
@@ -433,6 +513,13 @@ class OAuth2SessionRefreshWebFilterTest {
         return MockServerWebExchange.builder(MockServerHttpRequest.get("/api/v1/profile/me"))
                 .session(session)
                 .principal(authentication)
+                .build();
+    }
+
+    private MockServerWebExchange exchangeWithoutPrincipal(WebSession session) {
+        return MockServerWebExchange.builder(MockServerHttpRequest.get("/api/session")
+                        .cookie(new HttpCookie("GAME_SESSION", session.getId())))
+                .session(session)
                 .build();
     }
 
