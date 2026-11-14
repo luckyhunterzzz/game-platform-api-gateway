@@ -34,6 +34,11 @@ spring:
       server:
         webflux:
           routes:
+            - id: player-profile-service-public-shares
+              uri: http://player-profile-service:8083
+              predicates:
+                - Path=/api/v1/public/profile-hero-shares/**
+
             - id: main-service-public
               uri: http://main-service:8082
               predicates:
